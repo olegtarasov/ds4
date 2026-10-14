@@ -259,7 +259,9 @@ def main():
         (out / "legacy-fixtures.json").write_text(json.dumps(adapted, indent=2))
         frontier = max(item["tokens"] for item in saved)
         log = (out / "logs" / "ds4-q38fn-server.log").read_text(errors="replace")
-        remembered = re.findall(r"qwen tool-turn visible checkpoint remembered [^\n]* live=(\d+)", log)
+        # Accept both the current "qwen tool-turn ..." spelling and the generic
+        # "tool-turn ..." spelling from #1058's renamed helper.
+        remembered = re.findall(r"(?:qwen )?tool-turn visible checkpoint remembered [^\n]* live=(\d+)", log)
         assert remembered and frontier == int(remembered[-1]), (saved, remembered)
         assert any(item["tokens"] == frontier and item["flags"] & 1 for item in saved), saved
         assert any(item["tokens"] == frontier for item in adapted), adapted
