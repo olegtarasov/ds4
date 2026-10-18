@@ -77,3 +77,11 @@ Compute candidates from `paperniuk/ds4`:
 These are compute changes, with no additional SSD reads or disk-cache policy.
 A textual merge or unit pass alone is not acceptance. The research hub records
 runtime hashes, API comparisons, memory and the final retention decision.
+
+Build pitfall: upstream `make cpu` overwrites the frontend binary names, including
+`ds4-server`. CPU portability checks must use an isolated build tree or be
+followed by removing/relinking the generated frontend binaries for Metal. Merely
+running `make ds4-server` can consider the CPU binary up to date. Verify the
+Metal framework link before copying a runtime snapshot. The first candidate API
+startup caught this mismatch before loading the model; that failed diagnostic
+is retained in the hub and excluded from timing results.
