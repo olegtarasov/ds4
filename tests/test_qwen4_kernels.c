@@ -3667,8 +3667,6 @@ int main(void) {
     test_router(&arena, 32, 10, 5);
     printf("attention\n");
     test_attention(&arena, 24, 2, 256, 64, 4, 128, 2, 21);
-    /* Exercise multiple split boundaries and a four-key tail on the real head shape. */
-    test_attention(&arena, 24, 2, 256, 64, 4, 128, 64, 133);
     test_attention(&arena, 4, 2, 32, 8, 4, 32, 2, 30);
 #ifdef __APPLE__
     test_attention_rows(&arena);

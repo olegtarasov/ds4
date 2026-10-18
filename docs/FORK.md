@@ -85,10 +85,3 @@ running `make ds4-server` can consider the CPU binary up to date. Verify the
 Metal framework link before copying a runtime snapshot. The first candidate API
 startup caught this mismatch before loading the model; that failed diagnostic
 is retained in the hub and excluded from timing results.
-
-Attention candidate: port only the four-key loop from
-`paperniuk/ds4@d826794175ca2bae5fbded769439d0a6792962bf`. Omit BF16 matvec,
-fusion and unrelated benchmark changes. Existing profile overrides select
-64-key splits and wide merge for this host, preserving upstream device defaults.
-The numeric fixture now covers 133 positions on the real 24/2/256 head shape,
-including multiple split boundaries and a four-key remainder.
