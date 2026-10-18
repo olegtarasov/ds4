@@ -49,3 +49,31 @@ Report pressure, wired/compressor memory and swap-out deltas, not only RSS.
 No claims about CUDA/ROCm/TP, general coding readiness or live disk replay without
 those tests. Raw outputs belong in ignored artifacts; reviewed results and final
 acceptance decisions remain in the research hub.
+
+## Selective imports under evaluation (October 18)
+
+API repairs preserve original contributor authorship through cherry-picks:
+
+| Upstream PR | Original commits | Scope |
+| --- | --- | --- |
+| antirez/ds4#1006 | `4610665e` | SSE comments while tool/reasoning output is withheld |
+| antirez/ds4#1134 | `1074193f` | Preserve mid-list system messages and live tails |
+| antirez/ds4#1155 | `8a8b2a23`, `8922c813`, `8f61eced` | Actual backend-prefix validity and rebuild progress |
+| antirez/ds4#1169 | `995fba52`, `395a3edd` | Exact tool spans, EOS and closed-turn frontiers |
+| antirez/ds4#1175 | `9d471c45`, `4e8706de` | Parent-history validation and user follow-ups |
+
+The #1175/#1134 conflict was resolved by retaining both canonical parent-key
+construction and DeepSeek's fallback when a late system message cannot be
+appended to live KV. These changes do not enable disk KV caching.
+
+Compute candidates from `paperniuk/ds4`:
+
+- `c4045f71`: shared four-head block scorer and vector indexer. Retain upstream
+  device defaults in code; the explicit M2 profile selects the candidate.
+- `ded46d5f`, `9b7bf1a3`: coalesced full and prefiltered radix gathers. The former's
+  unrelated cold-matvec benchmark edits require foreign Q2_0 support and were
+  omitted; existing indexer correctness fixtures remain in use.
+
+These are compute changes, with no additional SSD reads or disk-cache policy.
+A textual merge or unit pass alone is not acceptance. The research hub records
+runtime hashes, API comparisons, memory and the final retention decision.
