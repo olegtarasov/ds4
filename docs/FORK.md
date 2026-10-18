@@ -85,3 +85,18 @@ running `make ds4-server` can consider the CPU binary up to date. Verify the
 Metal framework link before copying a runtime snapshot. The first candidate API
 startup caught this mismatch before loading the model; that failed diagnostic
 is retained in the hub and excluded from timing results.
+
+The four-key attention experiment is preserved on
+`codex/qwen-attention-experiment` and reverted from the working line: it passed
+numeric checks but did not show a consistent 8K API gain. Its combined 64-key /
+wide-merge trial had lower, variable generation rates; a 32-key follow-up was
+stopped by the host memory-pressure guard without new swap-outs. That safety
+stop does not establish a kernel-specific memory regression. Keep the
+indexer/gather candidate and original split/merge settings for further checks.
+
+When running the complete kernel suite, leave `DS4_QWEN4_IK_RING` unset because
+that suite also intentionally exercises batched-row paths that our graph guard
+rejects. `DS4_TEST_IK_RING=1` independently wraps the synthetic raw-key tensor;
+the dedicated payload-ring test validates the graph serialization contract.
+Imported live test launchers were written for other hardware/chunks: use the
+hub's memory-guarded owner on this Mac, not their defaults without review.
