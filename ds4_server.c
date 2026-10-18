@@ -21483,7 +21483,7 @@ static void test_anthropic_live_tail_keeps_system_note(void) {
         top.role = xstrdup("system");
         top.content = xstrdup("You are terse.");
         anthropic_place_system_prompt(&msgs, top, r.model_syntax);
-        anthropic_prepare_live_continuation(&s, &r, &msgs);
+        anthropic_prepare_live_continuation(&s, &r, &msgs, NULL);
         char *full = render_chat_prompt_text_for_syntax(r.model_syntax, &msgs, NULL, NULL,
                                                         r.think_mode);
         const char *tail = r.anthropic_live_suffix_text;
@@ -22744,12 +22744,17 @@ static void test_slot_probe_backend_stale(void) {
         job j = {0};
         j.req.api = API_ANTHROPIC;
         j.req.anthropic_requires_live_tool_state = true;
+        /* Model the parser evidence required by the parent-history guard. */
+        j.req.tool_delta_only = true;
         j.req.anthropic_live_suffix_text = xstrdup(" result");
         id_list_push_unique(&j.req.anthropic_live_call_ids, "toolu-1");
         ds4_tokens_push(&j.req.prompt, 999);
         slot_reuse pr = slot_probe_reuse_locked(&s, &slot, &j.req);
         TEST_ASSERT(pr.kind == REUSE_ANTHROPIC_TOOL_OUTPUT);
         TEST_ASSERT(pr.reuse_tokens == 10);
+        /* Matching ids alone cannot exempt an unproven full-history replay. */
+        j.req.tool_delta_only = false;
+        TEST_ASSERT(slot_probe_reuse_locked(&s, &slot, &j.req).kind == REUSE_NONE);
         live_tool_state_free(&slot.anthropic_live);
         ds4_session_free_test_checkpoint(slot.session);
         request_free(&j.req);
