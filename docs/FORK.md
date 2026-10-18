@@ -75,6 +75,8 @@ Compute candidates from `paperniuk/ds4`:
   omitted; existing indexer correctness fixtures remain in use.
 
 These are compute changes, with no additional SSD reads or disk-cache policy.
+The existing `DS4_QWEN4_MOE_DOWN_PREFETCH` profile flag schedules MXFP4 GPU
+loads; it is not n-gram I/O prefetch or routed-expert disk streaming.
 A textual merge or unit pass alone is not acceptance. The research hub records
 runtime hashes, API comparisons, memory and the final retention decision.
 
@@ -100,3 +102,74 @@ rejects. `DS4_TEST_IK_RING=1` independently wraps the synthetic raw-key tensor;
 the dedicated payload-ring test validates the graph serialization contract.
 Imported live test launchers were written for other hardware/chunks: use the
 hub's memory-guarded owner on this Mac, not their defaults without review.
+
+## Working on this Mac
+
+After edits, build the Metal frontends (`make -j8 all`) and relevant focused
+checks. Keep CPU portability builds isolated or explicitly restore/relink Metal
+frontends afterward, as described above. Do not use inherited live launchers
+with different chunk/residency defaults for this large model.
+
+With the installed router's original model unloaded and sufficient host memory
+free, run a guarded API check from the sibling hub. Use a fresh output directory
+for every run; this command is host-specific and assumes the existing model and
+private API key file are installed:
+
+```sh
+cd ~/Projects/local-llm-serving
+python3 scripts/api-setup-compare.py --engine dwarf \
+  --runtime "$HOME/Projects/ds4" \
+  --profile "$HOME/Projects/ds4/profiles/m2-max-qwen-q4.json" \
+  --cases short 8k --repetitions 3 \
+  --output artifacts/dwarfstar-fork-manual-check
+```
+
+The harness owns one temporary backend and authenticated gateway, checks memory
+pressure/swap, and stops them on completion. It preserves the installed service
+and Pi configuration. For a reproducible comparison, snapshot both the binary
+and `metal/` sources under ignored artifacts before changing source again.
+
+## October 18 qualification
+
+The retained runtime snapshot was built from `9f382b8` (later fork changes in
+this task are documentation only). Server SHA-256:
+`3c86583f08dbd4e504b037e434690ec6487e629655999f988909d26f0c980502`.
+Qwen shader SHA-256:
+`cfdbf01b02f0856d2a111f1451d1382854fcf8e94effb384699966f2d33ba3ff`.
+Full runtime/shader-tree/profile identities and raw-log hashes are recorded by
+the sibling hub in `evidence/dwarfstar-fork-2026-10-18/summary.json`.
+
+Locally measured on M2 Max / 96 GB, existing Q4, full 262144 capacity, chunk
+2048, one session, f16 K/V, MTP off, temperature zero and seed 42:
+
+- Fresh short/8K three-repeat comparisons after Docker exited pass with matching
+  prompts, output text and token counts. Median 8K generation is 27.86 versus
+  27.87 tokens/s: no established gain at that length. An earlier apparent 10%
+  screen gain did not repeat and is not the accepted speed claim.
+- One near-full pair (261617 input, 256 output) passes retrieval with identical
+  text/usage. Generation rises from 18.59 to 24.67 tokens/s (32.7% in this pair),
+  while TTFT stays about 764 versus 766 seconds and total about 778 versus 777.
+  Repeat before treating this as a distribution or general serving advantage.
+- Live Chat/tool calls and result consumption pass. For a withheld long tool
+  call, the baseline's 32.9-second SSE gap becomes 5.1 seconds with six keepalive
+  comments. Other imported branches have model-free coverage; this does not
+  qualify Pi or live Responses/Anthropic clients or history/cache replay.
+- All accepted runs above have normal pressure and zero new swap-outs. Near-full
+  system wired peaks are about 80.97 versus 81.76 GiB. A prior host-memory guard
+  stop with an approximately 11.3 GiB VM is excluded; the owner freed memory.
+  These results require headroom and are not a guarantee alongside arbitrary
+  other workloads. The guard remains enabled.
+
+Metal `make all`, model-free server/agent tests, focused numeric Qwen kernels
+(normal and wrapped synthetic raw keys), n-gram fixtures, ring roundtrips and a
+CPU portability build pass. CPU inference, CUDA/ROCm/TP and SSD-heavy integration
+checks were not executed. The attention experiment is reverted. The retained
+API/indexer line is a research baseline, not a broad coding-readiness claim.
+
+The frozen four-task Python coding suite, two no-feedback attempts each, scores
+4/8 strict passes: SQLite and DAG planning pass twice, SSE parsing and download
+resume fail twice. All eight prompt and visible output hashes match the prior
+working DwarfStar run, including failures. Pooled generation median in this run
+is 24.67 tokens/s; it is not a fresh controlled coding-speed comparison. Pressure
+stays normal and no new swap-outs occur. Detailed findings and acceptance limits
+are in the hub's `docs/dwarfstar-fork-2026-10-18.md` and reviewed evidence.

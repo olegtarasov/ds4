@@ -2,6 +2,12 @@
   <img src="logo.svg" alt="DwarfStar logo" width="220">
 </p>
 
+This is [Oleg's maintained fork](https://github.com/olegtarasov/ds4) of
+[antirez/ds4](https://github.com/antirez/ds4). Read [the fork guide](docs/FORK.md)
+for selective imports, the M2 Max Qwen profile and local validation boundaries.
+The separate sibling `local-llm-serving` repository holds broader serving
+research and benchmark evidence. The upstream project description follows.
+
 **DwarfStar** aims to be the best way to run a few excellent large
 language models on consumer hardware (that is, hardware that people
 can actually own). To reach this goal, we are building
