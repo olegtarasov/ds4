@@ -15932,6 +15932,12 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (cfg.batched_sessions > 0 && getenv("DS4_QWEN4_IK_RING") &&
+        !strcmp(getenv("DS4_QWEN4_IK_RING"), "1")) {
+        fprintf(stderr, "ds4: experimental indexer ring requires ordinary single-session mode\n");
+        ds4_engine_close(engine);
+        return 2;
+    }
     const int slot_count = cfg.batched_sessions > 0 ? cfg.batched_sessions : 1;
     log_context_memory(cfg.engine.backend,
                        cfg.ctx_size,

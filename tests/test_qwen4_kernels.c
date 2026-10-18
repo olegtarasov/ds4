@@ -1283,7 +1283,7 @@ static void test_attention(arena_t *a, uint32_t H, uint32_t Hkv, uint32_t D, uin
     ds4_gpu_tensor *gkc = ds4_gpu_tensor_alloc((uint64_t)cap * Hkv * D * 2);
     ds4_gpu_tensor *gvc = ds4_gpu_tensor_alloc((uint64_t)cap * Hkv * D * 2);
     ds4_gpu_tensor *giqo = upload(NULL, (uint64_t)Hi * Di);
-    ds4_gpu_tensor *gikc = upload(NULL, (uint64_t)cap * Di);
+    ds4_gpu_tensor *gikc = upload(NULL, (uint64_t)(getenv("DS4_TEST_IK_RING") ? 12u : cap) * Di);
     ds4_gpu_tensor *gbk = ds4_gpu_tensor_alloc((uint64_t)(cap / ratio + 1) * Di * 2);
     ds4_gpu_tensor *gscore = upload(NULL, (uint64_t)(cap / ratio + 1));
     ds4_gpu_tensor *gselb = ds4_gpu_tensor_alloc((uint64_t)k_blocks * 4);

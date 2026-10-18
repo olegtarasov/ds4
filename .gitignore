@@ -117,3 +117,5 @@ __pycache__/
 
 # Fork-local generated build, experiment and profiling outputs.
 /artifacts/
+
+/tests/test_qwen4_payload_ring
