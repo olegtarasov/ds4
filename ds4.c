@@ -8483,6 +8483,76 @@ static bool model_map_span_vec_finish(ds4_model_map_span_vec *spans) {
     return spans->len != 0;
 }
 
+/* MTP tensors remain available in the original mmap, but target-only Metal
+ * sessions must not register them as resident resources. */
+static bool qwen4_tensor_is_nextn(const ds4_tensor *t) {
+    for (uint32_t il = DS4_N_LAYER - DS4_N_NEXTN_PREDICT; il < DS4_N_LAYER; il++) {
+        char prefix[32];
+        snprintf(prefix, sizeof(prefix), "blk.%u.", il);
+        if (ds4_str_starts_with(t->name, prefix)) return true;
+    }
+    return false;
+}
+
+static uint32_t qwen4_model_spans(const ds4_model *m, bool include_nextn,
+        uint64_t *offsets, uint64_t *sizes, uint64_t *bytes, uint64_t *max_tensor) {
+    uint32_t count = 0;
+    *bytes = *max_tensor = 0;
+    for (uint64_t i = 0; i < m->n_tensors; i++) {
+        const ds4_tensor *t = &m->tensors[i];
+        if (t->abs_offset >= m->size || (!include_nextn && qwen4_tensor_is_nextn(t))) continue;
+        offsets[count] = t->abs_offset;
+        sizes[count++] = t->bytes;
+        *bytes += t->bytes;
+        if (t->bytes > *max_tensor) *max_tensor = t->bytes;
+    }
+    return count;
+}
+
+static uint32_t qwen4_target_model_spans(const ds4_model *m,
+        uint64_t *offsets, uint64_t *sizes, uint64_t *bytes, uint64_t *max_tensor) {
+    return qwen4_model_spans(m, false, offsets, sizes, bytes, max_tensor);
+}
+
+/* Pack adjacent tensors into bounded views without cutting a tensor or
+ * bridging a discarded MTP region. Page rounding adds at most one boundary
+ * page per group, rather than the huge overlap of generic model views. */
+static uint32_t qwen4_group_model_spans(uint64_t *offsets, uint64_t *sizes,
+        uint32_t count, uint64_t cap, uint64_t alignment, uint64_t *bytes) {
+    ds4_model_map_span *sorted = xmalloc((size_t)count * sizeof(*sorted));
+    for (uint32_t i = 0; i < count; i++) {
+        sorted[i].off = offsets[i];
+        sorted[i].end = offsets[i] + sizes[i];
+    }
+    qsort(sorted, count, sizeof(*sorted), model_map_span_cmp);
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint64_t off = sorted[i].off, end = sorted[i].end;
+        const uint64_t prev_end = n ? offsets[n-1] + sizes[n-1] : 0;
+        if (n && (off <= prev_end || off - prev_end <= alignment) &&
+                end - offsets[n-1] <= cap) {
+            if (end > prev_end) sizes[n-1] = end - offsets[n-1];
+        } else {
+            offsets[n] = off;
+            sizes[n++] = end - off;
+        }
+    }
+    free(sorted);
+    *bytes = 0;
+    for (uint32_t i = 0; i < n; i++) *bytes += sizes[i];
+    return n;
+}
+
+static uint32_t qwen4_ik_rows(uint32_t ctx, uint32_t chunk) {
+#ifdef __APPLE__
+    if (getenv("DS4_QWEN4_IK_RING") != NULL && !strcmp(getenv("DS4_QWEN4_IK_RING"), "1")) {
+        const uint32_t ring = ((chunk + 3u) / 4u) * 4u + 8u;
+        return ring < ctx ? ring : ctx;
+    }
+#endif
+    return ctx;
+}
+
 static DS4_MAYBE_UNUSED bool weights_model_map_spans(
         const ds4_weights *w,
         uint32_t layer_start,
@@ -40406,7 +40476,7 @@ ds4_context_memory ds4_context_memory_estimate_with_prefill_mode(
         m.raw_cap = ctx;
         m.comp_cap = (uint32_t)blocks;
         m.raw_bytes = (uint64_t)n_attn * ctx * kv_row + (uint64_t)ctx * 16u;
-        m.compressed_bytes = (uint64_t)n_attn * (ctx * DS4_N_INDEXER_HEAD_DIM * 4u + blocks * DS4_N_INDEXER_HEAD_DIM * 2u);
+        m.compressed_bytes = (uint64_t)n_attn * ((uint64_t)qwen4_ik_rows(ctx, (uint32_t)T) * DS4_N_INDEXER_HEAD_DIM * 4u + blocks * DS4_N_INDEXER_HEAD_DIM * 2u);
         m.scratch_bytes = T * (12u * hc_dim + 24u * E + (uint64_t)(DS4_N_EXPERT_USED + 1u) * (E + 2u * DS4_N_FF_EXP) +
                                2u * blocks) * 4u;
         /* Recurrent layers have fixed state even at a tiny context. Reserve
@@ -43174,6 +43244,17 @@ static void ds4_engine_print_startup_memory(
 #ifndef DS4_NO_GPU
     }
 #endif
+    /* The public estimate is conservative and includes MTP attention caches.
+     * The target-only Metal graph does not allocate them. */
+    if (e->backend == DS4_BACKEND_METAL && ds4_model_is_qwen4() && !e->glm_mtp) {
+        const uint64_t n = DS4_N_NEXTN_PREDICT, ctx = (uint32_t)ctx_size;
+        const uint64_t raw = n * ctx * 2ull * DS4_N_HEAD_KV * DS4_N_HEAD_DIM * 2u;
+        const uint64_t compressed = n * ((uint64_t)qwen4_ik_rows((uint32_t)ctx, mem.prefill_cap) * DS4_N_INDEXER_HEAD_DIM * 4u +
+                (ctx / 4u + 1u) * DS4_N_INDEXER_HEAD_DIM * 2u);
+        mem.raw_bytes -= raw;
+        mem.compressed_bytes -= compressed;
+        mem.total_bytes -= raw + compressed;
+    }
     const uint64_t kv_bytes =
         ds4_add_sat_u64(mem.raw_bytes, mem.compressed_bytes);
     const uint64_t dynamic_expert_cache_bytes =
@@ -58663,6 +58744,9 @@ static bool qwen4_graph_alloc(ds4_qwen4_gpu_graph *g, const ds4_weights *w, uint
     const uint64_t iq_dim = (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM;
     g->ctx_cap = ctx_cap;
     g->cap_tokens = cap_tokens;
+    if (qwen4_ik_rows(ctx_cap, cap_tokens) < ctx_cap)
+        fprintf(stderr, "ds4: Qwen FP32 indexer ring: ctx=%u chunk=%u rows=%u\n",
+                ctx_cap, cap_tokens, qwen4_ik_rows(ctx_cap, cap_tokens));
     g->k_blocks = DS4_N_INDEXER_TOP_K / 4u;
     g->n_logit_rows = mtp ? 3u : 1u;
     g->n_block_cap = ctx_cap / 4u + 1u;
@@ -58749,7 +58833,8 @@ private_state:
 #undef QWEN4_ALLOC
     const uint64_t state_bytes = v_dim * DS4_N_LIN_HEAD_DIM * sizeof(float);
     const uint64_t hist_bytes = (uint64_t)(DS4_N_LIN_CONV - 1u) * conv_dim * sizeof(float);
-    for (uint32_t il = 0; il < DS4_N_LAYER && ok; il++) {
+    const uint32_t live_layers = DS4_N_LAYER - (mtp ? 0u : DS4_N_NEXTN_PREDICT);
+    for (uint32_t il = 0; il < live_layers && ok; il++) {
         if (ds4_qwen4_layer_is_linear(il)) {
             if (state_pool && hist_pool) {
                 g->layer_lin_state[il] = ds4_gpu_tensor_view(state_pool[il],
@@ -58769,15 +58854,27 @@ private_state:
         } else {
             g->layer_k_cache[il] = ds4_gpu_tensor_alloc((uint64_t)ctx_cap * kv_dim * 2u);
             g->layer_v_cache[il] = ds4_gpu_tensor_alloc((uint64_t)ctx_cap * kv_dim * 2u);
-            g->layer_ik_cache[il] = qwen4_graph_alloc_f32((uint64_t)ctx_cap * DS4_N_INDEXER_HEAD_DIM);
+            g->layer_ik_cache[il] = qwen4_graph_alloc_f32((uint64_t)qwen4_ik_rows(ctx_cap, cap_tokens) * DS4_N_INDEXER_HEAD_DIM);
             g->layer_block_key[il] = ds4_gpu_tensor_alloc((uint64_t)g->n_block_cap * DS4_N_INDEXER_HEAD_DIM * 2u);
             ok = ok && g->layer_k_cache[il] && g->layer_v_cache[il] && g->layer_ik_cache[il] && g->layer_block_key[il];
         }
+    }
+    /* Checkpoints serialize zero rows for an unused MTP block. Keep tiny
+     * non-NULL handles so the existing zero-byte payload contract remains
+     * valid, without reserving a full context of unused attention caches. */
+    for (uint32_t il = live_layers; il < DS4_N_LAYER && ok; il++) {
+        g->layer_k_cache[il] = ds4_gpu_tensor_alloc(1);
+        g->layer_v_cache[il] = ds4_gpu_tensor_alloc(1);
+        g->layer_ik_cache[il] = ds4_gpu_tensor_alloc(1);
+        g->layer_block_key[il] = ds4_gpu_tensor_alloc(1);
+        ok = g->layer_k_cache[il] && g->layer_v_cache[il] &&
+             g->layer_ik_cache[il] && g->layer_block_key[il];
     }
     g->pos3 = qwen4_graph_alloc_f32((uint64_t)ctx_cap * 4u);
     ok = ok && g->pos3;
     g->host_pos3 = xmalloc(T * 4u * sizeof(uint32_t));
     g->host_logits = xmalloc((uint64_t)g->n_logit_rows * DS4_N_VOCAB * sizeof(float));
+    if (getenv("DS4_METAL_MEMORY_REPORT")) ds4_gpu_print_memory_report("Qwen graph allocation");
     if (!ok) {
         fprintf(stderr, "ds4: Qwen3.8 graph allocation failed (ctx %u)\n", ctx_cap);
         qwen4_graph_free(g);
@@ -59979,6 +60076,7 @@ static int generate_qwen4_metal_argmax(
         const token_vec   * prompt,
         int                 n_predict,
         int                 ctx_size,
+        uint32_t            prefill_chunk,
         const char        * directional_steering_file,
         float               directional_steering_attn,
         float               directional_steering_ffn,
@@ -59992,7 +60090,11 @@ static int generate_qwen4_metal_argmax(
         return 1;
     }
     ds4_qwen4_gpu_graph *g = xcalloc(1, sizeof(*g));
-    if (!qwen4_graph_alloc(g, weights, (uint32_t)ctx_size, qwen4_prefill_chunk_tokens((uint32_t)ctx_size), false, NULL, NULL, NULL, 0)) {
+    const uint32_t cap_tokens = prefill_chunk ?
+        (prefill_chunk < (uint32_t)ctx_size ? prefill_chunk : (uint32_t)ctx_size) :
+        qwen4_prefill_chunk_tokens((uint32_t)ctx_size);
+    fprintf(stderr, "ds4: Qwen3.8 argmax graph: ctx=%d prefill_cap=%u\n", ctx_size, cap_tokens);
+    if (!qwen4_graph_alloc(g, weights, (uint32_t)ctx_size, cap_tokens, false, NULL, NULL, NULL, 0)) {
         free(g);
         return 1;
     }
@@ -60089,6 +60191,7 @@ static int generate_metal_graph_raw_swa(
 #ifdef DS4_HAS_QWEN4_GPU
     if (ds4_model_is_qwen4()) {
         return generate_qwen4_metal_argmax(model, vocab, weights, prompt, n_predict, ctx_size,
+                                           prefill_chunk,
                                            directional_steering_file,
                                            directional_steering_attn, directional_steering_ffn,
                                            emit, done, emit_ud, progress, progress_ud);
@@ -63497,6 +63600,46 @@ static uint64_t qwen4_payload_ple_hist_bytes(void) {
     return (uint64_t)(DS4_N_PLE_CONV - 1u) * DS4_N_PLE_NGRAM * DS4_N_EMBD * DS4_N_HC * sizeof(float);
 }
 
+/* Preserve the old payload's logical row layout. Completed historical raw
+ * keys are never read again: their full block keys have already been saved.
+ * Retain the live tail, zero-fill the unused prefix, and rotate on restore. */
+static int qwen4_payload_write_ik(FILE *fp, const ds4_gpu_tensor *tensor,
+        uint32_t rows, uint8_t *buf, size_t cap, char *err, size_t errlen) {
+    const uint64_t row_bytes = (uint64_t)DS4_N_INDEXER_HEAD_DIM * sizeof(float);
+    const uint64_t stored = ds4_gpu_tensor_bytes(tensor) / row_bytes;
+    if (stored >= rows || !stored)
+        return payload_write_tensor_span(fp, tensor, 0, row_bytes * rows, buf, cap, err, errlen);
+    uint64_t zeros = (rows - stored) * row_bytes;
+    memset(buf, 0, cap);
+    while (zeros) {
+        const size_t n = zeros > cap ? cap : (size_t)zeros;
+        if (payload_write_bytes(fp, buf, n, err, errlen)) return 1;
+        zeros -= n;
+    }
+    const uint64_t start = (rows - stored) % stored;
+    if (payload_write_tensor_span(fp, tensor, start * row_bytes, (stored - start) * row_bytes,
+                                 buf, cap, err, errlen)) return 1;
+    return payload_write_tensor_span(fp, tensor, 0, start * row_bytes, buf, cap, err, errlen);
+}
+
+static int qwen4_payload_read_ik(FILE *fp, ds4_gpu_tensor *tensor,
+        uint32_t rows, uint8_t *buf, size_t cap, uint64_t *remaining, char *err, size_t errlen) {
+    const uint64_t row_bytes = (uint64_t)DS4_N_INDEXER_HEAD_DIM * sizeof(float);
+    const uint64_t stored = ds4_gpu_tensor_bytes(tensor) / row_bytes;
+    if (stored >= rows || !stored)
+        return payload_read_tensor_span(fp, tensor, 0, row_bytes * rows, buf, cap, remaining, err, errlen);
+    uint64_t skip = (rows - stored) * row_bytes;
+    while (skip) {
+        const size_t n = skip > cap ? cap : (size_t)skip;
+        if (payload_read_bytes(fp, buf, n, remaining, err, errlen)) return 1;
+        skip -= n;
+    }
+    const uint64_t start = (rows - stored) % stored;
+    if (payload_read_tensor_span(fp, tensor, start * row_bytes, (stored - start) * row_bytes,
+                                buf, cap, remaining, err, errlen)) return 1;
+    return payload_read_tensor_span(fp, tensor, 0, start * row_bytes, buf, cap, remaining, err, errlen);
+}
+
 static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows) {
     uint64_t bytes = sizeof(uint32_t);   /* mtp_rows */
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
@@ -63569,7 +63712,7 @@ static int qwen4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_
                                            buf, DS4_SESSION_IO_CHUNK, err, errlen);
             if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(n),
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
-            if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(n),
+            if (rc == 0) rc = qwen4_payload_write_ik(fp, g->layer_ik_cache[il], n,
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
             if (rc == 0) rc = payload_write_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(n),
                                                         buf, DS4_SESSION_IO_CHUNK, err, errlen);
@@ -63659,7 +63802,7 @@ static int qwen4_session_load_payload(ds4_session *s, FILE *fp, const uint32_t *
                                           buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
             if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_v_cache[il], 0, qwen4_payload_kv_bytes(n),
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
-            if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_ik_cache[il], 0, qwen4_payload_ik_bytes(n),
+            if (rc == 0) rc = qwen4_payload_read_ik(fp, g->layer_ik_cache[il], n,
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
             if (rc == 0) rc = payload_read_tensor_span(fp, g->layer_block_key[il], 0, qwen4_payload_block_key_bytes(n),
                                                        buf, DS4_SESSION_IO_CHUNK, remaining, err, errlen);
@@ -71623,6 +71766,11 @@ static int ds4_engine_open_internal(ds4_engine **out,
     if (opt->n_threads > 0) g_requested_threads = (uint32_t)opt->n_threads;
     e->placement_ctx_hint = opt->placement_ctx_hint;
     e->placement_session_count_hint = opt->placement_session_count_hint;
+    if (e->placement_session_count_hint > 1 && getenv("DS4_QWEN4_IK_RING") &&
+        !strcmp(getenv("DS4_QWEN4_IK_RING"), "1")) {
+        fprintf(stderr, "ds4: experimental Qwen indexer ring supports one session only\n");
+        ds4_engine_close(e); *out = NULL; return 1;
+    }
     /* The TP worker executes mirrored sessions serially, just like the
      * server scheduler. Do not allocate a full prefill workspace per session. */
     e->share_session_prefill_workspace = opt->share_session_prefill_workspace ||
@@ -72732,6 +72880,26 @@ static int ds4_engine_open_internal(ds4_engine **out,
                                                         load_span_count,
                                                         spans.max_tensor_bytes);
             free(spans.v);
+        } else if (e->backend == DS4_BACKEND_METAL && ds4_model_is_qwen4()) {
+            /* Tensor-sized views avoid the >largest-tensor overlap of the
+             * default 58 GiB buffers. No tensor bytes or precision change. */
+            load_offsets = xmalloc((size_t)e->model.n_tensors * sizeof(*load_offsets));
+            load_sizes = xmalloc((size_t)e->model.n_tensors * sizeof(*load_sizes));
+            uint64_t max_tensor = 0;
+            load_span_count = e->glm_mtp ?
+                qwen4_model_spans(&e->model, true, load_offsets, load_sizes,
+                        &e->startup_model_span_bytes, &max_tensor) :
+                qwen4_target_model_spans(&e->model, load_offsets, load_sizes,
+                        &e->startup_model_span_bytes, &max_tensor);
+            const uint32_t tensors = load_span_count;
+            load_span_count = qwen4_group_model_spans(load_offsets, load_sizes,
+                    load_span_count, 4ull * 1024 * 1024 * 1024, e->model.alignment,
+                    &e->startup_model_span_bytes);
+            fprintf(stderr, "ds4: Qwen grouped Metal mapping: %u tensors in %u spans, %.2f GiB; MTP %s\n",
+                    tensors, load_span_count, (double)e->startup_model_span_bytes / 1073741824.0,
+                    e->glm_mtp ? "included" : "excluded");
+            model_map_ok = ds4_gpu_set_model_map_spans(e->model.map, e->model.size,
+                    load_offsets, load_sizes, load_span_count, max_tensor);
         } else {
             e->startup_model_span_bytes = e->model.size > e->model.tensor_data_pos ?
                 e->model.size - e->model.tensor_data_pos : 0;

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "context": 262144,
+  "prefill_chunk": 2048,
+  "environment": {
+    "DS4_QWEN4_IK_RING": 1,
+    "DS4_QWEN4_MOE_MV_SPECIALIZE": 1,
+    "DS4_QWEN4_Q4K_MID_NR": 1,
+    "DS4_QWEN4_Q4K_MID_NSG": 8,
+    "DS4_QWEN4_MOE_DOWN_PREFETCH": 1
+  }
+}

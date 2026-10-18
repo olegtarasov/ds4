@@ -51,7 +51,52 @@ static void fixture(const char *path, bool bad_alignment, uint32_t type) {
     assert(!fclose(f));
 }
 
+static void test_target_model_spans(void) {
+    const uint32_t layers = g_ds4_shape.n_layer, nextn = g_ds4_shape.n_nextn_predict;
+    g_ds4_shape.n_layer = 49;
+    g_ds4_shape.n_nextn_predict = 1;
+    ds4_tensor tensors[] = {
+        {.name={"token_embd.weight",17}, .abs_offset=100, .bytes=20},
+        {.name={"blk.48.attn.weight",18}, .abs_offset=120, .bytes=30},
+        {.name={"blk.47.attn.weight",18}, .abs_offset=150, .bytes=40},
+        {.name={"output.weight",13}, .abs_offset=190, .bytes=10},
+        {.name={"per_layer_token_embd.weight",26}, .abs_offset=200, .bytes=1000},
+    };
+    ds4_model m = {.size=200, .n_tensors=5, .tensors=tensors};
+    uint64_t offsets[5], sizes[5], bytes, max_tensor;
+    assert(qwen4_target_model_spans(&m, offsets, sizes, &bytes, &max_tensor) == 3);
+    assert(bytes == 70 && max_tensor == 40);
+    assert(offsets[0] == 100 && sizes[0] == 20);
+    assert(offsets[1] == 150 && sizes[1] == 40);
+    assert(offsets[2] == 190 && sizes[2] == 10);
+    g_ds4_shape.n_nextn_predict = 0;
+    assert(qwen4_target_model_spans(&m, offsets, sizes, &bytes, &max_tensor) == 4);
+    assert(bytes == 100); /* No MTP architecture: retain blk.48 too. */
+    g_ds4_shape.n_layer = layers;
+    g_ds4_shape.n_nextn_predict = nextn;
+}
+
+static void test_grouped_model_spans(void) {
+    uint64_t offsets[] = {256, 0, 64, 1024}, sizes[] = {64, 32, 64, 256}, bytes = 0;
+    uint32_t n = qwen4_group_model_spans(offsets, sizes, 4, 128, 32, &bytes);
+    assert(n == 3 && bytes == 448);
+    assert(offsets[0] == 0 && sizes[0] == 128); /* Includes only alignment gap. */
+    assert(offsets[1] == 256 && sizes[1] == 64); /* Does not bridge discarded region. */
+    assert(offsets[2] == 1024 && sizes[2] == 256); /* Never splits a large tensor. */
+    const uint32_t layers = g_ds4_shape.n_layer, nextn = g_ds4_shape.n_nextn_predict;
+    g_ds4_shape.n_layer = 49; g_ds4_shape.n_nextn_predict = 1;
+    ds4_tensor t = {.name={"blk.48.attn.weight",18}, .abs_offset=100, .bytes=20};
+    ds4_model m = {.size=120, .n_tensors=1, .tensors=&t};
+    uint64_t maximum;
+    assert(qwen4_model_spans(&m, true, offsets, sizes, &bytes, &maximum) == 1);
+    assert(bytes == 20 && maximum == 20);
+    assert(qwen4_target_model_spans(&m, offsets, sizes, &bytes, &maximum) == 0);
+    g_ds4_shape.n_layer = layers; g_ds4_shape.n_nextn_predict = nextn;
+}
+
 int main(void) {
+    test_grouped_model_spans();
+    test_target_model_spans();
     char path[] = "/tmp/ds4-qwen-ngrams-XXXXXX";
     int fd = mkstemp(path);
     assert(fd >= 0);

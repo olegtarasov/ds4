@@ -1383,3 +1383,12 @@ clean:
 
 # The active tokenizer includes generated Unicode classes.
 ds4.o ds4_cpu.o ds4_cpu_test_hooks.o: ds4_qwen4_unicode.inc
+
+# Tiny synthetic Metal test; no language-model weights or inference.
+tests/test_qwen4_payload_ring.o: tests/test_qwen4_payload_ring.c ds4.c ds4.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -I. -c -o $@ $<
+tests/test_qwen4_payload_ring: tests/test_qwen4_payload_ring.o $(filter-out ds4.o,$(CORE_OBJS))
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -o $@ $^ $(METAL_LDLIBS)
+.PHONY: test-qwen4-payload-ring
+test-qwen4-payload-ring: tests/test_qwen4_payload_ring
+	./tests/test_qwen4_payload_ring

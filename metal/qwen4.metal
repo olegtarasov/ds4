@@ -1382,7 +1382,7 @@ static inline void qwen4_attn_prep_slot(
     {
         const uint npt = Di / 32;
         device const float *src = ik + (uint64_t)tok * Di;
-        device float *dst = ik_cache + (uint64_t)pos * Di;
+        device float *dst = ik_cache + (uint64_t)(args.pad0 ? pos % args.pad0 : pos) * Di;
         for (uint i = 0; i < npt; i++) dst[tiisg * npt + i] = src[tiisg * npt + i];
     }
 }
@@ -1470,7 +1470,10 @@ static inline void qwen4_idx_block_key_one(
     float tmp[64];
     for (uint i = 0; i < npt; i++) {
         float acc = 0.0f;
-        for (uint t = 0; t < args.ratio; t++) acc += ik_cache[((uint64_t)b * args.ratio + t) * Di + tiisg * npt + i];
+        for (uint t = 0; t < args.ratio; t++) {
+            const uint64_t pos = (uint64_t)b * args.ratio + t;
+            acc += ik_cache[(args.pad0 ? pos % args.pad0 : pos) * Di + tiisg * npt + i];
+        }
         v[i] = acc / (float)args.ratio;
     }
     float ss = 0.0f;
